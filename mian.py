@@ -11,7 +11,7 @@ import streamlit as st
 # 기본 설정
 # =========================
 st.set_page_config(
-    page_title="CINEBOX | 어제의 박스오피스",
+    page_title="CINEBOX | 박스오피스",
     page_icon="🎬",
     layout="wide",
 )
@@ -24,16 +24,16 @@ API_URL = (
 ASSET_DIR = Path(__file__).parent / "assets"
 
 # 한국 시간 기준 어제 날짜
+KST = ZoneInfo("Asia/Seoul")
 YESTERDAY = (
-    datetime.datetime.now(ZoneInfo("Asia/Seoul")).date()
+    datetime.datetime.now(KST).date()
     - datetime.timedelta(days=1)
 )
-TARGET_DT = YESTERDAY.strftime("%Y%m%d")
 
 
 # =========================
 # 영화 정보 직접 입력
-# 추가 영화 정보 API 사용 안 함
+# 추가 영화 정보 API는 사용하지 않음
 # =========================
 MOVIE_DETAILS = {
     "사냥개들": {
@@ -41,14 +41,7 @@ MOVIE_DETAILS = {
         "director": "직접 입력해 주세요",
         "short_intro": "영화의 간단한 소개를 입력해 주세요.",
         "plot": "확인한 줄거리를 입력해 주세요.",
-        "cast": [
-            # 아래 형식으로 출연진 정보를 추가하세요.
-            # {
-            #     "character": "등장인물",
-            #     "actor": "배우 또는 성우",
-            #     "note": "배역 설명",
-            # },
-        ],
+        "cast": [],
     },
     "치이카와": {
         "poster_file": "poster_chiikawa.jpg",
@@ -85,7 +78,7 @@ def get_details(movie_name):
 
 
 def get_poster(movie_name):
-    """assets 폴더에 저장한 포스터를 불러옵니다."""
+    """assets 폴더에서 포스터 파일을 찾습니다."""
     filename = get_details(movie_name).get("poster_file")
 
     if not filename:
@@ -95,8 +88,31 @@ def get_poster(movie_name):
     return path if path.exists() else None
 
 
+def format_movie_name(movie):
+    """누적 관객수가 100만 명을 초과하면 트로피를 붙입니다."""
+    name = str(movie["movieNm"])
+    audience_total = int(movie["audiAcc"])
+
+    if audience_total > 1_000_000:
+        return f"🏆 {name}"
+
+    return name
+
+
+def format_rank_change(value):
+    """전일 대비 순위 변동을 화살표로 표시합니다."""
+    value = int(value)
+
+    if value > 0:
+        return f"🔺 +{value}"
+    elif value < 0:
+        return f"🔽 {value}"
+    else:
+        return "➖ 0"
+
+
 # =========================
-# 디자인
+# 화면 디자인
 # =========================
 st.markdown("""
 <style>
@@ -223,16 +239,39 @@ div[data-testid="stDataFrame"] {
 # =========================
 # 제목
 # =========================
-st.markdown(f"""
+st.markdown("""
 <div class="hero">
     <div class="eyebrow">C I N E B O X / DAILY CHART</div>
     <div class="hero-title">어제의 영화,<br>오늘의 기록.</div>
     <div class="hero-desc">
-        {YESTERDAY.strftime('%Y년 %m월 %d일')} 기준 · KOBIS 일별 박스오피스<br>
-        박스오피스 데이터로 살펴보는 영화 트렌드
+        날짜별 박스오피스를 확인하고 영화 순위와 관객수를 비교해 보세요.<br>
+        박스오피스 데이터: 영화관입장권통합전산망(KOBIS)
     </div>
 </div>
 """, unsafe_allow_html=True)
+
+
+# =========================
+# 날짜 선택
+# =========================
+st.markdown(
+    '<div class="section-heading">📅 날짜 선택</div>',
+    unsafe_allow_html=True,
+)
+st.caption("달력에서 조회할 날짜를 선택하세요. 오늘 날짜는 집계 전이므로 선택할 수 없습니다.")
+
+selected_date = st.date_input(
+    "박스오피스 조회 날짜",
+    value=YESTERDAY,
+    max_value=YESTERDAY,
+    format="YYYY-MM-DD",
+)
+
+TARGET_DT = selected_date.strftime("%Y%m%d")
+
+st.markdown(
+    f"**조회 날짜: {selected_date.strftime('%Y년 %m월 %d일')}**",
+)
 
 
 # =========================
@@ -256,7 +295,10 @@ if not api_key:
 def fetch_boxoffice(date_str, key):
     response = requests.get(
         API_URL,
-        params={"key": key, "targetDt": date_str},
+        params={
+            "key": key,
+            "targetDt": date_str,
+        },
         timeout=15,
     )
     response.raise_for_status()
@@ -305,18 +347,21 @@ if not isinstance(result, dict):
 
 movies = result.get("dailyBoxOfficeList", [])
 
+# 목록이 비어 있으면 집계 전 안내를 표시합니다.
 if not movies:
-    st.warning(
-        "해당 날짜의 영화 목록이 비어 있습니다. "
-        "KOBIS 집계 완료 여부를 확인해 주세요."
-    )
+    st.warning("그날은 아직 집계 전입니다")
     st.stop()
 
 df = pd.DataFrame(movies)
 
 required = [
-    "rank", "movieNm", "openDt",
-    "audiCnt", "audiAcc", "scrnCnt"
+    "rank",
+    "rankInten",
+    "movieNm",
+    "openDt",
+    "audiCnt",
+    "audiAcc",
+    "scrnCnt",
 ]
 
 missing = [col for col in required if col not in df.columns]
@@ -325,11 +370,12 @@ if missing:
     st.error("API 응답에 필요한 항목이 없습니다: " + ", ".join(missing))
     st.stop()
 
-for col in ["rank", "audiCnt", "audiAcc", "scrnCnt"]:
+# 숫자 데이터 변환
+for col in ["rank", "rankInten", "audiCnt", "audiAcc", "scrnCnt"]:
     df[col] = pd.to_numeric(df[col], errors="coerce")
 
-if df[["rank", "audiCnt", "audiAcc", "scrnCnt"]].isna().any().any():
-    st.error("순위 또는 관객수 데이터에 잘못된 값이 있습니다.")
+if df[["rank", "rankInten", "audiCnt", "audiAcc", "scrnCnt"]].isna().any().any():
+    st.error("순위, 순위 변동 또는 관객수 데이터에 잘못된 값이 있습니다.")
     st.stop()
 
 df = df.sort_values("rank").reset_index(drop=True)
@@ -339,35 +385,39 @@ df = df.sort_values("rank").reset_index(drop=True)
 # 1위 영화 지표
 # =========================
 top = df.iloc[0]
+top_name = format_movie_name(top)
 
 st.markdown(
     '<div class="section-heading">🏆 오늘의 박스오피스 리더</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="section-subtitle">어제 가장 많은 관객이 선택한 영화</div>',
+    '<div class="section-subtitle">선택한 날짜의 박스오피스 1위 영화</div>',
     unsafe_allow_html=True,
 )
 
-st.markdown(f"""
-<div style="background:#121a2a;border:1px solid #263248;
-border-radius:14px;padding:15px 18px;">
-    <span style="color:#aaa2ff;font-weight:800;">NO. 01</span>
-    &nbsp;&nbsp;
-    <span style="font-size:20px;color:white;font-weight:800;">
-        {top['movieNm']}
-    </span>
-    &nbsp;&nbsp;
-    <span style="color:#aab7ce;">
-        개봉일: {top['openDt'] or '정보 없음'}
-    </span>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    f"""
+    <div style="background:#121a2a;border:1px solid #263248;
+    border-radius:14px;padding:15px 18px;">
+        <span style="color:#aaa2ff;font-weight:800;">NO. 01</span>
+        &nbsp;&nbsp;
+        <span style="font-size:20px;color:white;font-weight:800;">
+            {top_name}
+        </span>
+        &nbsp;&nbsp;
+        <span style="color:#aab7ce;">
+            개봉일: {top['openDt'] or '정보 없음'}
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 cols = st.columns(3)
 
 metrics = [
-    (cols[0], "👥 어제 관객수", int(top["audiCnt"]), "명"),
+    (cols[0], "👥 해당 날짜 관객수", int(top["audiCnt"]), "명"),
     (cols[1], "🎟️ 누적 관객수", int(top["audiAcc"]), "명"),
     (cols[2], "🖥️ 스크린수", int(top["scrnCnt"]), "개"),
 ]
@@ -405,11 +455,13 @@ def show_movie_dialog(movie):
             st.info("등록된 포스터가 없습니다.")
 
     with right:
-        st.title(name)
-        st.caption(f"박스오피스 {int(movie['rank'])}위")
+        st.title(format_movie_name(movie))
+        st.caption(f"조회 날짜: {selected_date.strftime('%Y년 %m월 %d일')}")
+        st.write(f"**박스오피스 순위:** {int(movie['rank'])}위")
+        st.write(f"**전일 대비 순위 변동:** {format_rank_change(movie['rankInten'])}")
         st.write(f"**감독:** {details['director']}")
         st.write(f"**개봉일:** {movie.get('openDt') or '정보 없음'}")
-        st.write(f"**어제 관객수:** {int(movie['audiCnt']):,}명")
+        st.write(f"**해당 날짜 관객수:** {int(movie['audiCnt']):,}명")
         st.write(f"**누적 관객수:** {int(movie['audiAcc']):,}명")
         st.write(f"**스크린수:** {int(movie['scrnCnt']):,}개")
 
@@ -463,7 +515,7 @@ st.markdown(
 )
 st.markdown(
     '<div class="section-subtitle">'
-    '상세 정보를 누르기 전에 감독과 간단한 소개를 확인하세요.'
+    '포스터와 감독, 간단한 소개를 확인하세요.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -487,7 +539,7 @@ for _, movie in df.head(3).iterrows():
         with text_col:
             st.caption(f"RANKING 0{rank}")
             st.markdown(
-                f'<div class="movie-name">{name}</div>',
+                f'<div class="movie-name">{format_movie_name(movie)}</div>',
                 unsafe_allow_html=True,
             )
             st.write(f"🎬 **감독:** {details['director']}")
@@ -496,7 +548,8 @@ for _, movie in df.head(3).iterrows():
             st.markdown(
                 f'<div class="muted">'
                 f'개봉일: {movie["openDt"] or "정보 없음"}'
-                f' · 어제 관객수: {int(movie["audiCnt"]):,}명'
+                f' · 관객수: {int(movie["audiCnt"]):,}명'
+                f' · 순위 변동: {format_rank_change(movie["rankInten"])}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -510,6 +563,7 @@ for _, movie in df.head(3).iterrows():
                 st.session_state["selected_movie"] = movie_dict
                 st.rerun()
 
+
 selected = st.session_state.get("selected_movie")
 
 if selected:
@@ -517,14 +571,16 @@ if selected:
 
 
 # =========================
-# 전체 박스오피스 순위표
+# 전체 박스오피스 표
 # =========================
 st.markdown(
     '<div class="section-heading">📋 전체 박스오피스</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="section-subtitle">KOBIS 공식 일별 집계 데이터</div>',
+    '<div class="section-subtitle">'
+    '순위 변동과 누적 관객수 기준 트로피를 확인하세요.'
+    '</div>',
     unsafe_allow_html=True,
 )
 
@@ -542,27 +598,21 @@ if search.strip():
         )
     ]
 
-table = filtered[
-    ["rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"]
-].copy()
-
-table.columns = [
-    "순위", "영화명", "개봉일",
-    "관객수", "누적 관객수", "스크린수"
-]
-
-table["순위"] = table["순위"].astype(int)
-
-for col in ["관객수", "누적 관객수", "스크린수"]:
-    table[col] = table[col].astype("int64").map(
-        lambda value: f"{value:,}"
-    )
+table = pd.DataFrame({
+    "순위": filtered["rank"].astype(int),
+    "순위 변동": filtered["rankInten"].apply(format_rank_change),
+    "영화명": filtered.apply(format_movie_name, axis=1),
+    "개봉일": filtered["openDt"],
+    "관객수": filtered["audiCnt"].astype("int64").map(lambda x: f"{x:,}"),
+    "누적 관객수": filtered["audiAcc"].astype("int64").map(lambda x: f"{x:,}"),
+    "스크린수": filtered["scrnCnt"].astype("int64").map(lambda x: f"{x:,}"),
+})
 
 st.dataframe(
     table,
     hide_index=True,
     width="stretch",
-    height=420,
+    height=450,
 )
 
 
@@ -575,13 +625,14 @@ st.markdown(
 )
 st.markdown(
     '<div class="section-subtitle">'
-    '어제 관객수가 많았던 영화 다섯 편 비교'
+    '선택한 날짜에 관객수가 많았던 영화 다섯 편'
     '</div>',
     unsafe_allow_html=True,
 )
 
-top5 = df.sort_values("audiCnt", ascending=False).head(5)
-chart = top5[["movieNm", "audiCnt"]].set_index("movieNm")
+top5 = df.sort_values("audiCnt", ascending=False).head(5).copy()
+top5["표시명"] = top5.apply(format_movie_name, axis=1)
+chart = top5[["표시명", "audiCnt"]].set_index("표시명")
 chart.columns = ["관객수"]
 
 st.bar_chart(
@@ -601,6 +652,6 @@ st.markdown("""
 <div style="text-align:center;color:#8794ad;font-size:12px;line-height:2;">
     <b style="color:#c1c8ff;">CINEBOX</b><br>
     박스오피스 데이터: 영화관입장권통합전산망(KOBIS)<br>
-    영화 소개·줄거리·배역: 관리자가 직접 입력한 정보
+    순위 변동: KOBIS rankInten · 영화 소개 및 배역: 직접 입력한 정보
 </div>
 """, unsafe_allow_html=True)
